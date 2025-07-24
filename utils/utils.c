@@ -2,6 +2,7 @@
 #include <dbus/dbus.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,96 +286,72 @@ void print_dbus_error(const char *str, DBusError *err) {
   fprintf(stderr, "%s: %s\n", str, err->message);
 }
 
-dbus_int64_t get_track_length(DBusConnection *conn, const char *bus_name) {
-  DBusMessage *msg;
-  DBusMessage *reply;
+int64_t get_track_length(DBusConnection *conn, const char *bus_name) {
   DBusError err;
-  DBusMessageIter args, variant, dict;
-
-  const char *track_id = get_track_id(conn, bus_name);
-  if (!track_id) {
-    fprintf(stderr, "Track ID is NULL\n");
-    return -1;
-  }
-
   dbus_error_init(&err);
-  conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
-  if (dbus_error_is_set(&err)) {
-    print_dbus_error("Connection Error", &err);
-    dbus_error_free(&err);
-    return -1;
-  }
 
-  msg = dbus_message_new_method_call(bus_name, "/org/mpris/MediaPlayer2",
-                                     "org.freedesktop.DBus.Properties", "Get");
-  if (!msg) {
-    fprintf(stderr, "Message Null\n");
+  DBusMessage *msg =
+      dbus_message_new_method_call(bus_name, "/org/mpris/MediaPlayer2",
+                                   "org.freedesktop.DBus.Properties", "Get");
+  if (!msg)
     return -1;
-  }
 
   const char *iface = "org.mpris.MediaPlayer2.Player";
-  const char *prop = "Metadata";
-
+  const char *propname = "Metadata";
   dbus_message_append_args(msg, DBUS_TYPE_STRING, &iface, DBUS_TYPE_STRING,
-                           &prop, DBUS_TYPE_INVALID);
+                           &propname, DBUS_TYPE_INVALID);
 
-  reply = dbus_connection_send_with_reply_and_block(conn, msg, -1, &err);
+  DBusMessage *reply =
+      dbus_connection_send_with_reply_and_block(conn, msg, -1, &err);
   dbus_message_unref(msg);
-  if (dbus_error_is_set(&err)) {
-    print_dbus_error("Reply Error", &err);
+  if (!reply) {
     dbus_error_free(&err);
     return -1;
   }
 
-  if (!reply) {
-    fprintf(stderr, "Reply was NULL\n");
-    return -1;
-  }
-
-  if (!dbus_message_iter_init(reply, &args)) {
-    fprintf(stderr, "Reply has no arguments\n");
+  DBusMessageIter top;
+  if (!dbus_message_iter_init(reply, &top) ||
+      dbus_message_iter_get_arg_type(&top) != DBUS_TYPE_VARIANT) {
     dbus_message_unref(reply);
     return -1;
   }
 
-  dbus_message_iter_recurse(&args, &variant); // variant of a{sv}
-  if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_ARRAY) {
-    fprintf(stderr, "Metadata is not a dict\n");
+  DBusMessageIter var;
+  dbus_message_iter_recurse(&top, &var);
+  if (dbus_message_iter_get_arg_type(&var) != DBUS_TYPE_ARRAY) {
     dbus_message_unref(reply);
     return -1;
   }
 
-  dbus_message_iter_recurse(&variant, &dict);
+  DBusMessageIter array;
+  dbus_message_iter_recurse(&var, &array);
+  if (dbus_message_iter_get_arg_type(&array) == DBUS_TYPE_INVALID) {
+    /* Empty metadata – nothing to see. */
+    dbus_message_unref(reply);
+    return -1;
+  }
 
-  while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {
-    DBusMessageIter entry, key_iter, value_iter;
-    const char *key;
+  int64_t length = -1;
+  while (dbus_message_iter_get_arg_type(&array) == DBUS_TYPE_DICT_ENTRY) {
+    DBusMessageIter entry;
+    dbus_message_iter_recurse(&array, &entry);
 
-    dbus_message_iter_recurse(&dict, &entry);
-    dbus_message_iter_recurse(&entry, &key_iter);
-
-    if (dbus_message_iter_get_arg_type(&key_iter) != DBUS_TYPE_STRING) {
-      dbus_message_iter_next(&dict);
-      continue;
-    }
-
-    dbus_message_iter_get_basic(&key_iter, &key);
+    const char *key = NULL;
+    dbus_message_iter_get_basic(&entry, &key);
     dbus_message_iter_next(&entry);
+    if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
+      DBusMessageIter val;
+      dbus_message_iter_recurse(&entry, &val);
 
-    if (strcmp(key, "mpris:length") == 0) {
-      dbus_message_iter_recurse(&entry, &value_iter);
-      if (dbus_message_iter_get_arg_type(&value_iter) == DBUS_TYPE_INT64) {
-        dbus_int64_t length;
-        dbus_message_iter_get_basic(&value_iter, &length);
-        dbus_message_unref(reply);
-        return length;
+      if (strcmp(key, "mpris:length") == 0 &&
+          dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_INT64) {
+        dbus_message_iter_get_basic(&val, &length);
+        break;
       }
     }
-
-    dbus_message_iter_next(&dict);
+    dbus_message_iter_next(&array);
   }
 
   dbus_message_unref(reply);
-  fprintf(stderr, "mpris:length not found in metadata\n");
-  return -1;
+  return length; /* –1 if missing/error, else µs */
 }
