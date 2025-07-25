@@ -153,8 +153,7 @@ int main(int argc, char *argv[]) {
     end_us = get_track_length(conn, player);
     max_loops = times;
     set_position(conn, player, start_us);
-  }
-  if (argc == 4 || argc == 5) {
+  } else if (argc == 4 || argc == 5) {
     if (strcmp(argv[1], "-p") == 0) {
       if (argc == 4) {
         // loopctl part START END - partial, infinite
