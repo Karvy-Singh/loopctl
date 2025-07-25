@@ -93,6 +93,14 @@ static DBusHandlerResult filter_cb(DBusConnection *c, DBusMessage *m,
   return DBUS_HANDLER_RESULT_HANDLED;
 }
 
+void usage() {
+  fprintf(stderr, "Usage:\n");
+  fprintf(stderr, "  loopctl                    # full, infinite\n");
+  fprintf(stderr, "  loopctl N                  # full, N times\n");
+  fprintf(stderr, "  loopctl -p START END     # partial, infinite\n");
+  fprintf(stderr, "  loopctl -p START END N   # partial, N times\n");
+}
+
 int main(int argc, char *argv[]) {
   signal(SIGINT, handle_sigint);
 
@@ -145,31 +153,34 @@ int main(int argc, char *argv[]) {
     end_us = get_track_length(conn, player);
     max_loops = times;
     set_position(conn, player, start_us);
+  }
+  if (argc == 4 || argc == 5) {
+    if (strcmp(argv[1], "-p") == 0) {
+      if (argc == 4) {
+        // loopctl part START END - partial, infinite
+        int s = atoi(argv[2]);
+        int e = atoi(argv[3]);
+        start_us = (int64_t)s * 1000000;
+        end_us = (int64_t)e * 1000000;
+        set_position(conn, player, start_us);
 
-  } else if (argc == 4) {
-    // loopctl part START END - partial, infinite
-    int s = atoi(argv[2]);
-    int e = atoi(argv[3]);
-    start_us = (int64_t)s * 1000000;
-    end_us = (int64_t)e * 1000000;
-    set_position(conn, player, start_us);
-
-  } else if (argc == 5) {
-    // loopctl part START END X - partial, X times
-    int s = atoi(argv[2]);
-    int e = atoi(argv[3]);
-    int times = atoi(argv[4]);
-    start_us = (int64_t)s * 1000000;
-    end_us = (int64_t)e * 1000000;
-    max_loops = times;
-    set_position(conn, player, start_us);
+      } else if (argc == 5) {
+        // loopctl part START END X - partial, X times
+        int s = atoi(argv[2]);
+        int e = atoi(argv[3]);
+        int times = atoi(argv[4]);
+        start_us = (int64_t)s * 1000000;
+        end_us = (int64_t)e * 1000000;
+        max_loops = times;
+        set_position(conn, player, start_us);
+      }
+    } else {
+      usage();
+      goto cleanup;
+    }
 
   } else {
-    fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s                    # full, infinite\n", argv[0]);
-    fprintf(stderr, "  %s N                  # full, N times\n", argv[0]);
-    fprintf(stderr, "  %s part START END     # partial, infinite\n", argv[0]);
-    fprintf(stderr, "  %s part START END N   # partial, N times\n", argv[0]);
+    usage();
     goto cleanup;
   }
 
