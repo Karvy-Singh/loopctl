@@ -326,7 +326,6 @@ int64_t get_track_length(DBusConnection *conn, const char *bus_name) {
   DBusMessageIter array;
   dbus_message_iter_recurse(&var, &array);
   if (dbus_message_iter_get_arg_type(&array) == DBUS_TYPE_INVALID) {
-    /* Empty metadata – nothing to see. */
     dbus_message_unref(reply);
     return -1;
   }

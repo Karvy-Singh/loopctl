@@ -13,7 +13,7 @@
 
 static volatile sig_atomic_t keep_running = 1;
 static DBusConnection *conn;
-static const char *player; // the MPRIS player we’re looping
+static const char *player;
 static int timer_fd;
 static int64_t start_us, end_us;
 int loop_count = 0;
@@ -225,24 +225,19 @@ int main(int argc, char *argv[]) {
       uint64_t expirations = 0;
       if (read(timer_fd, &expirations, sizeof(expirations)) > 0) {
 
-        /* Sanity: timerfd is one-shot, but just in case… */
         if (expirations == 0)
           expirations = 1;
 
-        /* Count how many times we've ALREADY finished the segment */
         loop_count += (int)expirations;
         fprintf(stderr, "[loopctl] segment done (%d/%d)\n", loop_count,
                 max_loops);
 
-        /* If user asked for a finite number and we just finished the last one,
-         * stop */
         if (max_loops > 0 && loop_count >= max_loops) {
           fprintf(stderr, "[loopctl] reached max loops, exiting\n");
           keep_running = 0;
-          continue; /* IMPORTANT: do NOT seek back once we’re done */
+          continue;
         }
 
-        /* Otherwise: jump back and re-arm */
         set_position(conn, player, start_us);
         arm_timer(start_us);
         fprintf(stderr, "[loopctl] rewound to %" PRId64 " µs\n", start_us);
