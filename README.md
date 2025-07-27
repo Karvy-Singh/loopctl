@@ -27,7 +27,7 @@ OR any other use case it may be useful to you as a tool.
    ```
 ## USAGE
 ```bash
-loopctl [OPTIONS}
+loopctl [OPTIONS]
 ```
 * `loopctl`: Loop the full current media infinitely.
 * `loopctl N`: Loop the full current media N times.
