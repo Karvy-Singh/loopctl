@@ -13,102 +13,54 @@
 
 static volatile sig_atomic_t keep_running = 1;
 static DBusConnection *conn;
-static const char *player;
-static int timer_fd;
-static int64_t start_us, end_us;
-int loop_count = 0;
-int max_loops = 0;
+static const char *player; // the MPRIS player we’re looping
+
+static void arm_timer(int tfd, uint64_t usec, bool periodic) {
+  struct itimerspec its;
+  // first expiration after 'usec' microseconds:
+  its.it_value.tv_sec = usec / 1000000;
+  its.it_value.tv_nsec = (usec % 1000000) * 1000;
+  if (periodic) {
+    // repeat every 'usec'
+    its.it_interval = its.it_value;
+  } else {
+    // one-shot
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+  }
+  if (timerfd_settime(tfd, 0, &its, NULL) == -1) {
+    perror("timerfd_settime");
+    exit(1);
+  }
+}
 
 void handle_sigint(int sig) {
   (void)sig;
   keep_running = 0;
 }
 
-static void arm_timer(int64_t now_us) {
-  if (now_us >= end_us)
-    now_us = start_us;
-  int64_t delta = end_us - now_us;
-  struct itimerspec its = {.it_value = {
-                               .tv_sec = delta / 1000000,
-                               .tv_nsec = (delta % 1000000) * 1000,
-                           }};
-  if (timerfd_settime(timer_fd, 0, &its, NULL) < 0)
-    perror("timerfd_settime");
-}
-
-static DBusHandlerResult filter_cb(DBusConnection *c, DBusMessage *m,
-                                   void *userdata) {
-  (void)c;
-  (void)userdata;
-
-  if (dbus_message_is_signal(m, "org.freedesktop.DBus.Properties",
-                             "PropertiesChanged")) {
-    const char *iface;
-    DBusMessageIter iter, dict;
-    dbus_message_iter_init(m, &iter);
-    dbus_message_iter_get_basic(&iter, &iface);
-    if (strcmp(iface, "org.mpris.MediaPlayer2.Player") == 0) {
-      dbus_message_iter_next(&iter);
-      dbus_message_iter_recurse(&iter, &dict);
-
-      while (dbus_message_iter_get_arg_type(&dict) != DBUS_TYPE_INVALID) {
-        DBusMessageIter entry, variant;
-        const char *prop;
-        dbus_message_iter_recurse(&dict, &entry);
-        dbus_message_iter_get_basic(&entry, &prop);
-
-        if (strcmp(prop, "PlaybackStatus") == 0) {
-          dbus_message_iter_next(&entry);
-          dbus_message_iter_recurse(&entry, &variant);
-          const char *status;
-          dbus_message_iter_get_basic(&variant, &status);
-
-          if (strcmp(status, "Playing") == 0) {
-            int64_t pos = get_position(conn, player);
-            arm_timer(pos);
-          } else {
-            /* pause: stop the timer */
-            struct itimerspec off = {{0}, {0}};
-            timerfd_settime(timer_fd, 0, &off, NULL);
-          }
-        }
-
-        dbus_message_iter_next(&dict);
-      }
-    }
-
-  } else if (dbus_message_is_signal(m, "org.mpris.MediaPlayer2.Player",
-                                    "Seeked")) {
-    int64_t new_pos;
-    if (dbus_message_get_args(m, NULL, DBUS_TYPE_INT64, &new_pos,
-                              DBUS_TYPE_INVALID)) {
-      if (new_pos >= end_us) {
-        set_position(conn, player, start_us);
-      } else {
-        arm_timer(new_pos);
-      }
-    }
-  }
-
-  return DBUS_HANDLER_RESULT_HANDLED;
-}
-
 void usage() {
-  fprintf(stderr, "Usage:\n");
-  fprintf(stderr, "  loopctl                    # full, infinite\n");
-  fprintf(stderr, "  loopctl N                  # full, N times\n");
-  fprintf(stderr, "  loopctl -p START END     # partial, infinite\n");
-  fprintf(stderr, "  loopctl -p START END N   # partial, N times\n");
+  char *prog = "loopctl";
+  fprintf(stderr,
+          "Usage:\n"
+          "  %s                 # loop full track infinitely\n"
+          "  %s N               # loop full track N times\n"
+          "  %s -p START END    # loop [START,END] infinitely\n"
+          "  %s -p START END X  # loop [START,END] X times\n"
+          "  (START, END in seconds)\n",
+          prog, prog, prog, prog);
+  exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[]) {
+  int tfd;
+  int64_t start_us, end_us, duration_us;
+  uint64_t expirations;
   signal(SIGINT, handle_sigint);
 
-  DBusError err;
-  dbus_error_init(&err);
-  conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
+  conn = connect_session_bus();
   if (!conn) {
-    fprintf(stderr, "Failed to connect to session bus: %s\n", err.message);
+    fprintf(stderr, "Failed to connect to session bus\n");
     return EXIT_FAILURE;
   }
 
@@ -140,42 +92,83 @@ int main(int argc, char *argv[]) {
     return EXIT_FAILURE;
   }
 
+  tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+  if (tfd == -1) {
+    perror("timerfd_create");
+    goto cleanup;
+  }
+
   if (argc == 1) {
-    // loopctl - full, infinite
+    // loopctl        -> full track, infinite
     start_us = 0;
     end_us = get_track_length(conn, player);
+    duration_us = end_us - start_us;
+
+    // first play immediately
     set_position(conn, player, start_us);
+    // then arm a periodic timer
+    arm_timer(tfd, duration_us, true);
+
+    // every time it fires, reposition
+    while (keep_running) {
+      if (read(tfd, &expirations, sizeof(expirations)) != sizeof(expirations)) {
+        perror("read timerfd");
+        break;
+      }
+      set_position(conn, player, start_us);
+    }
 
   } else if (argc == 2) {
-    // loopctl 5 - full, 5 times
+    // loopctl X      -> full track, X times
     int times = atoi(argv[1]);
     start_us = 0;
     end_us = get_track_length(conn, player);
-    max_loops = times;
-    set_position(conn, player, start_us);
-  } else if (argc == 4 || argc == 5) {
-    if (strcmp(argv[1], "-p") == 0) {
-      if (argc == 4) {
-        // loopctl part START END - partial, infinite
-        int s = atoi(argv[2]);
-        int e = atoi(argv[3]);
-        start_us = (int64_t)s * 1000000;
-        end_us = (int64_t)e * 1000000;
-        set_position(conn, player, start_us);
+    duration_us = end_us - start_us;
 
-      } else if (argc == 5) {
-        // loopctl part START END X - partial, X times
-        int s = atoi(argv[2]);
-        int e = atoi(argv[3]);
-        int times = atoi(argv[4]);
-        start_us = (int64_t)s * 1000000;
-        end_us = (int64_t)e * 1000000;
-        max_loops = times;
-        set_position(conn, player, start_us);
+    for (int loop = 0; loop < times && keep_running; loop++) {
+      // reposition then wait one-shot
+      set_position(conn, player, start_us);
+      arm_timer(tfd, duration_us, false);
+      if (read(tfd, &expirations, sizeof(expirations)) != sizeof(expirations)) {
+        perror("read timerfd");
+        break;
       }
-    } else {
-      usage();
-      goto cleanup;
+    }
+
+  } else if (argc == 4) {
+    // loopctl part S E    -> partial segment, infinite
+    int s = atoi(argv[2]), e = atoi(argv[3]);
+    start_us = (int64_t)s * 1000000;
+    end_us = (int64_t)e * 1000000;
+    duration_us = end_us - start_us;
+
+    set_position(conn, player, start_us);
+    arm_timer(tfd, duration_us, true);
+
+    while (keep_running) {
+      if (read(tfd, &expirations, sizeof(expirations)) != sizeof(expirations)) {
+        perror("read timerfd");
+        break;
+      }
+      set_position(conn, player, start_us);
+    }
+
+  } else if (argc == 5) {
+    // loopctl part S E X  -> partial segment, X times
+    int s = atoi(argv[2]);
+    int e = atoi(argv[3]);
+    int times = atoi(argv[4]);
+    start_us = (int64_t)s * 1000000;
+    end_us = (int64_t)e * 1000000;
+    duration_us = end_us - start_us;
+
+    for (int loop = 0; loop < times && keep_running; loop++) {
+      set_position(conn, player, start_us);
+      arm_timer(tfd, duration_us, false);
+      if (read(tfd, &expirations, sizeof(expirations)) != sizeof(expirations)) {
+        perror("read timerfd");
+        break;
+      }
     }
 
   } else {
@@ -183,85 +176,11 @@ int main(int argc, char *argv[]) {
     goto cleanup;
   }
 
-  dbus_bus_add_match(conn,
-                     "type='signal',"
-                     "interface='org.freedesktop.DBus.Properties',"
-                     "member='PropertiesChanged',"
-                     "arg0='org.mpris.MediaPlayer2.Player'",
-                     NULL);
-  dbus_bus_add_match(conn,
-                     "type='signal',"
-                     "interface='org.mpris.MediaPlayer2.Player',"
-                     "member='Seeked'",
-                     NULL);
-  dbus_connection_add_filter(conn, filter_cb, NULL, NULL);
-
-  timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
-  if (timer_fd < 0) {
-    perror("timerfd_create");
-    goto cleanup;
-  }
-
-  char *st = get_playback_status(conn, player);
-  if (st && strcmp(st, "Playing") == 0) {
-    int64_t pos = get_position(conn, player);
-    arm_timer(pos);
-  }
-  free(st);
-
-  int dbus_fd;
-  if (!dbus_connection_get_unix_fd(conn, &dbus_fd)) {
-    fprintf(stderr, "Failed to get D-Bus unix fd\n");
-    close(timer_fd);
-    goto cleanup;
-  }
-
-  struct pollfd pfds[2];
-  while (keep_running) {
-    pfds[0].fd = dbus_fd;
-    pfds[0].events = POLLIN;
-    pfds[1].fd = timer_fd;
-    pfds[1].events = POLLIN;
-
-    if (poll(pfds, 2, -1) < 0 && errno != EINTR) {
-      perror("poll");
-      break;
-    }
-
-    if (pfds[0].revents & POLLIN)
-      dbus_connection_read_write_dispatch(conn, 0);
-
-    if (pfds[1].revents & POLLIN) {
-      uint64_t expirations = 0;
-      if (read(timer_fd, &expirations, sizeof(expirations)) > 0) {
-
-        if (expirations == 0)
-          expirations = 1;
-
-        loop_count += (int)expirations;
-        fprintf(stderr, "[loopctl] segment done (%d/%d)\n", loop_count,
-                max_loops);
-
-        if (max_loops > 0 && loop_count >= max_loops) {
-          fprintf(stderr, "[loopctl] reached max loops, exiting\n");
-          keep_running = 0;
-          continue;
-        }
-
-        set_position(conn, player, start_us);
-        arm_timer(start_us);
-        fprintf(stderr, "[loopctl] rewound to %" PRId64 " µs\n", start_us);
-      }
-    }
-  }
-
-  close(timer_fd);
-  dbus_connection_remove_filter(conn, filter_cb, NULL);
+  close(tfd);
 
 cleanup:
   for (int i = 0; i < count; i++)
     free(players[i]);
   free(players);
-
   return EXIT_SUCCESS;
 }
