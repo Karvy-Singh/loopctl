@@ -3,12 +3,14 @@ Repeat a media/section of media "x" number of times on Linux.
 
 ## WHY??
 Well, sometimes we (i do) may find ourselves in scenarios wherein i want to play a song lets say two times before switching to next one in my playist, and some players provide either repeat once or forever without custom repeat numbers/ some provide no option to repeat.
+
 Also most players don't allow to repeat a certain part of media, example in case of a 8 min if i want to hear a certain 1-2 min again, another one dance teachers wanting to teach on a certain part of song.
+
 OR any other use case it may be useful to you as a tool.
 
 ## Prerequisites/Dependencies
-- libdbus-1‑dev (or equivalent DBus development package)
-- GCC and pkg-config (if not already)
+- `libdbus-1‑dev` (or equivalent DBus development package)
+- `GCC` and `pkg-config` (if not already)
 
 ## Installation
 
